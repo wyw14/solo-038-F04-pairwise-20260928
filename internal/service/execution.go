@@ -172,30 +172,80 @@ func (runtime *Runtime) registerOperation(current model.Job) error {
 	if err := runtime.register.Start(current.Generation, plateGeneration, 0, now); err != nil {
 		return err
 	}
-	frame := sensor.CameraFrame{ID: string(model.NewOperationID()), Camera: "register-camera", JobGeneration: current.Generation, PlateGeneration: plateGeneration, WebMeter: 1, Offset: 0.04, CapturedAt: now, ReceivedAt: now.Add(time.Millisecond)}
-	runtime.sensors.PutFrame(frame)
-	if err := runtime.registerControl.AcceptFrame(frame, runtime.config.RegisterGap); err != nil {
-		return err
-	}
+	// Receive one camera observation per color for the active plate generation.
+	units := runtime.pressUnits.Names()
+	observations := map[string]float64{"cyan": 0.04, "magenta": -0.05, "yellow": 0.07, "black": -0.03}
+	frames := map[string]sensor.CameraFrame{}
 	receiverState := registerpkg.NewState()
 	if err := receiverState.Start(current.Generation, plateGeneration, 0, now); err != nil {
 		return err
 	}
 	receiver := registerpkg.NewReceiver(receiverState, runtime.config.RegisterGap)
-	if err := receiver.Receive(frame); err != nil {
-		return err
+	for _, unit := range units {
+		offset, ok := observations[unit]
+		if !ok {
+			continue
+		}
+		frame := sensor.CameraFrame{ID: string(model.NewOperationID()), Camera: "register-camera-" + unit, Unit: unit, JobGeneration: current.Generation, PlateGeneration: plateGeneration, WebMeter: 1, Offset: offset, CapturedAt: now, ReceivedAt: now.Add(time.Millisecond)}
+		runtime.sensors.PutFrame(frame)
+		if err := runtime.registerControl.AcceptFrame(frame, runtime.config.RegisterGap); err != nil {
+			return err
+		}
+		if err := receiver.Receive(frame); err != nil {
+			return err
+		}
+		if frame.DeliveryDelay() < 0 {
+			return fmt.Errorf("register camera diagnostics failed")
+		}
+		frames[unit] = frame
 	}
-	if frame.DeliveryDelay() < 0 || runtime.sensors.FrameCount() == 0 {
+	if runtime.sensors.FrameCount() == 0 {
 		return fmt.Errorf("register camera diagnostics failed")
 	}
-	if err := runtime.pressControl.RecordRegister(plateGeneration, frame.Offset); err != nil {
+	for unit, frame := range frames {
+		if err := runtime.pressControl.RecordRegister(plateGeneration, unit, frame.Offset); err != nil {
+			return err
+		}
+	}
+	// Plan the joint correction, bounded by each unit's travel limit, and
+	// apply it only when every color contributed a valid observation.
+	plan, err := runtime.phase.PlanJoint(units, frames, current.Generation, plateGeneration)
+	if err != nil {
 		return err
+	}
+	adjustments, err := runtime.phase.ApplyJoint(plan)
+	if err != nil {
+		return err
+	}
+	// Confirm the commanded correction with every unit.
+	commanded := map[string]float64{}
+	for _, adjustment := range adjustments {
+		commanded[adjustment.Unit] = adjustment.Correction
+	}
+	command := runtime.pressControl.BeginRegisterCorrection(current, uint64(now.UnixNano()), commanded, now)
+	for _, unit := range units {
+		correction, ok := commanded[unit]
+		if !ok {
+			return fmt.Errorf("register correction is missing for unit %s", unit)
+		}
+		ack := model.Acknowledgement{Unit: unit, Operation: command.Operation, Epoch: command.Epoch, Value: correction, At: now}
+		if err := runtime.pressControl.AcknowledgeRegister(ack); err != nil {
+			return err
+		}
+	}
+	if !runtime.pressControl.RegisterConfirmed() {
+		return fmt.Errorf("register correction was not confirmed by every unit")
+	}
+	window := runtime.register.Snapshot()
+	for _, unit := range units {
+		if window.Units[unit] == 0 {
+			return fmt.Errorf("register window has no observation for unit %s", unit)
+		}
 	}
 	if !runtime.pressControl.RegisterStable(0.1, 1) || !runtime.registerControl.Stable(1) {
 		return fmt.Errorf("register evidence did not stabilize")
 	}
-	_, err = press.ApplyRegisterFrame(runtime.phase, "cyan", frame, current.Generation, plateGeneration)
-	return err
+	return nil
 }
 
 func (runtime *Runtime) switchInkOperation(withFault bool) error {

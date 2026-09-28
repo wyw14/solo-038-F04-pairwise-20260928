@@ -21,13 +21,7 @@ func (controller *PhaseController) Correct(unit string, offset float64, plateGen
 	if math.IsNaN(offset) || math.IsInf(offset, 0) || controller.maximum <= 0 {
 		return 0, fmt.Errorf("phase correction input is invalid")
 	}
-	correction := -offset
-	if correction > controller.maximum {
-		correction = controller.maximum
-	}
-	if correction < -controller.maximum {
-		correction = -controller.maximum
-	}
+	correction, _ := limitCorrection(offset, controller.maximum)
 	if err := controller.state.SetPhase(unit, correction, plateGeneration); err != nil {
 		return 0, err
 	}
@@ -35,6 +29,20 @@ func (controller *PhaseController) Correct(unit string, offset float64, plateGen
 	controller.commands[unit] = correction
 	controller.mu.Unlock()
 	return correction, nil
+}
+
+// limitCorrection converts an observed offset into a correction bounded by
+// the unit travel limit, reporting whether the limit was reached.
+func limitCorrection(offset, maximum float64) (float64, bool) {
+	correction := -offset
+	switch {
+	case correction > maximum:
+		return maximum, true
+	case correction < -maximum:
+		return -maximum, true
+	default:
+		return correction, false
+	}
 }
 
 func (controller *PhaseController) Last(unit string) (float64, bool) {

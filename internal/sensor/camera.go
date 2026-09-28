@@ -8,6 +8,7 @@ import (
 type CameraFrame struct {
 	ID              string    `json:"id"`
 	Camera          string    `json:"camera"`
+	Unit            string    `json:"unit"`
 	JobGeneration   uint64    `json:"job_generation"`
 	PlateGeneration uint64    `json:"plate_generation"`
 	WebMeter        float64   `json:"web_meter"`
@@ -17,7 +18,7 @@ type CameraFrame struct {
 }
 
 func (frame CameraFrame) Validate() error {
-	if frame.ID == "" || frame.Camera == "" {
+	if frame.ID == "" || frame.Camera == "" || frame.Unit == "" {
 		return fmt.Errorf("camera frame identity is incomplete")
 	}
 	if frame.JobGeneration == 0 || frame.PlateGeneration == 0 {

@@ -9,14 +9,15 @@ import (
 )
 
 type Window struct {
-	JobGeneration   uint64    `json:"job_generation"`
-	PlateGeneration uint64    `json:"plate_generation"`
-	StartMeter      float64   `json:"start_meter"`
-	LastMeter       float64   `json:"last_meter"`
-	StartedAt       time.Time `json:"started_at"`
-	LastAt          time.Time `json:"last_at"`
-	Samples         int       `json:"samples"`
-	Valid           bool      `json:"valid"`
+	JobGeneration   uint64         `json:"job_generation"`
+	PlateGeneration uint64         `json:"plate_generation"`
+	StartMeter      float64        `json:"start_meter"`
+	LastMeter       float64        `json:"last_meter"`
+	StartedAt       time.Time      `json:"started_at"`
+	LastAt          time.Time      `json:"last_at"`
+	Samples         int            `json:"samples"`
+	Units           map[string]int `json:"units"`
+	Valid           bool           `json:"valid"`
 }
 
 type State struct {
@@ -34,7 +35,7 @@ func (state *State) Start(jobGeneration, plateGeneration uint64, meter float64, 
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	state.window = Window{JobGeneration: jobGeneration, PlateGeneration: plateGeneration, StartMeter: meter, LastMeter: meter, StartedAt: now.UTC(), LastAt: now.UTC(), Valid: true}
+	state.window = Window{JobGeneration: jobGeneration, PlateGeneration: plateGeneration, StartMeter: meter, LastMeter: meter, StartedAt: now.UTC(), LastAt: now.UTC(), Units: map[string]int{}, Valid: true}
 	return nil
 }
 
@@ -53,6 +54,7 @@ func (state *State) Add(frame sensor.CameraFrame) error {
 	state.window.LastMeter = frame.WebMeter
 	state.window.LastAt = frame.ReceivedAt
 	state.window.Samples++
+	state.window.Units[frame.Unit]++
 	return nil
 }
 
@@ -65,5 +67,10 @@ func (state *State) Break() {
 func (state *State) Snapshot() Window {
 	state.mu.RLock()
 	defer state.mu.RUnlock()
-	return state.window
+	window := state.window
+	window.Units = make(map[string]int, len(state.window.Units))
+	for unit, count := range state.window.Units {
+		window.Units[unit] = count
+	}
+	return window
 }
