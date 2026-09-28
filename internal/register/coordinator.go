@@ -15,6 +15,7 @@ type Coordinator struct {
 	state     *State
 	journal   *journal.Store
 	released  map[model.JobID]journal.IntervalRecord
+	batch     *CorrectionBatch
 	lastError error
 }
 
@@ -37,14 +38,21 @@ func (coordinator *Coordinator) AcceptFrame(frame sensor.CameraFrame, maximumGap
 	return coordinator.state.Add(frame)
 }
 
+// Stable reports whether every process color has at least minimum accepted
+// frames for the active window. Three stable colors cannot mask the fourth.
 func (coordinator *Coordinator) Stable(minimum int) bool {
 	window := coordinator.state.Snapshot()
-	return window.Valid && window.Samples >= minimum
+	return window.Stable(model.ProcessColors(), minimum)
+}
+
+// MissingColors returns the process colors without an accepted observation.
+func (coordinator *Coordinator) MissingColors() []string {
+	return coordinator.state.MissingColors()
 }
 
 func (coordinator *Coordinator) Release(job model.Job, operation model.OperationID, proofs []model.Proof, now time.Time) error {
 	window := coordinator.state.Snapshot()
-	if !window.Valid || window.Samples == 0 {
+	if !window.Valid || window.Samples() == 0 {
 		return fmt.Errorf("register window is incomplete")
 	}
 	interval := model.Interval{JobID: job.ID, JobGeneration: job.Generation, RollGeneration: job.RollGeneration, StartMeter: window.StartMeter, EndMeter: window.LastMeter, OpenedAt: window.StartedAt, ClosedAt: now.UTC()}

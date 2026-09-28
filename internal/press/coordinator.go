@@ -11,6 +11,7 @@ import (
 
 type registerSample struct {
 	plateGeneration uint64
+	color           string
 	offset          float64
 }
 
@@ -77,29 +78,61 @@ func (coordinator *Coordinator) ChangePlate(plate string) (uint64, error) {
 	return generation, nil
 }
 
-func (coordinator *Coordinator) RecordRegister(plateGeneration uint64, offset float64) error {
+func (coordinator *Coordinator) RecordRegister(plateGeneration uint64, color string, offset float64) error {
 	_, active, _, _ := coordinator.state.Snapshot()
 	if plateGeneration != active {
 		return fmt.Errorf("register sample belongs to another plate")
 	}
+	if !model.IsProcessColor(color) {
+		return fmt.Errorf("register sample color %q is not a process color", color)
+	}
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
-	coordinator.registerSamples = append(coordinator.registerSamples, registerSample{plateGeneration: plateGeneration, offset: offset})
+	coordinator.registerSamples = append(coordinator.registerSamples, registerSample{plateGeneration: plateGeneration, color: color, offset: offset})
 	if len(coordinator.registerSamples) > 20 {
 		coordinator.registerSamples = coordinator.registerSamples[len(coordinator.registerSamples)-20:]
 	}
 	return nil
 }
 
+// RegisterStable reports whether every process color has at least minimum
+// in-tolerance samples for the active plate. A single well-behaved color
+// cannot satisfy the four-color set on its own.
 func (coordinator *Coordinator) RegisterStable(tolerance float64, minimum int) bool {
 	coordinator.mu.RLock()
 	defer coordinator.mu.RUnlock()
 	_, active, _, _ := coordinator.state.Snapshot()
-	count := 0
+	inTolerance := map[string]int{}
 	for _, sample := range coordinator.registerSamples {
 		if sample.plateGeneration == active && math.Abs(sample.offset) <= tolerance {
-			count++
+			inTolerance[sample.color]++
 		}
 	}
-	return count >= minimum
+	for _, color := range model.ProcessColors() {
+		if inTolerance[color] < minimum {
+			return false
+		}
+	}
+	return true
+}
+
+// RegisterMissingColors returns the process colors without an in-tolerance
+// sample for the active plate.
+func (coordinator *Coordinator) RegisterMissingColors(tolerance float64) []string {
+	coordinator.mu.RLock()
+	defer coordinator.mu.RUnlock()
+	_, active, _, _ := coordinator.state.Snapshot()
+	inTolerance := map[string]bool{}
+	for _, sample := range coordinator.registerSamples {
+		if sample.plateGeneration == active && math.Abs(sample.offset) <= tolerance {
+			inTolerance[sample.color] = true
+		}
+	}
+	missing := []string{}
+	for _, color := range model.ProcessColors() {
+		if !inTolerance[color] {
+			missing = append(missing, color)
+		}
+	}
+	return missing
 }

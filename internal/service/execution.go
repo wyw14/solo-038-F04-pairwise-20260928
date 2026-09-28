@@ -163,6 +163,23 @@ func (runtime *Runtime) stopPressOperation(current model.Job) error {
 }
 
 func (runtime *Runtime) registerOperation(current model.Job) error {
+	// One observation per process color for the active plate. Offsets are the
+	// relative color-to-color registration errors the joint correction removes
+	// together rather than correcting cyan alone.
+	offsets := map[string]float64{
+		model.Cyan:    0.04,
+		model.Magenta: -0.12,
+		model.Yellow:  0.08,
+		model.Black:   0.05,
+	}
+	return runtime.runRegisterOperation(current, offsets)
+}
+
+// runRegisterOperation performs the joint four-color registration for the
+// supplied per-color observations. Colors absent from offsets are treated as
+// unobserved: the joint plan names them as missing and the operation fails
+// instead of presenting the remaining colors as a stable set.
+func (runtime *Runtime) runRegisterOperation(current model.Job, offsets map[string]float64) error {
 	now := time.Now()
 	plateGeneration, err := runtime.pressControl.ChangePlate(string(model.NewOperationID()))
 	if err != nil {
@@ -172,30 +189,79 @@ func (runtime *Runtime) registerOperation(current model.Job) error {
 	if err := runtime.register.Start(current.Generation, plateGeneration, 0, now); err != nil {
 		return err
 	}
-	frame := sensor.CameraFrame{ID: string(model.NewOperationID()), Camera: "register-camera", JobGeneration: current.Generation, PlateGeneration: plateGeneration, WebMeter: 1, Offset: 0.04, CapturedAt: now, ReceivedAt: now.Add(time.Millisecond)}
-	runtime.sensors.PutFrame(frame)
-	if err := runtime.registerControl.AcceptFrame(frame, runtime.config.RegisterGap); err != nil {
-		return err
+	frames := map[string]sensor.CameraFrame{}
+	for index, color := range model.ProcessColors() {
+		offset, ok := offsets[color]
+		if !ok {
+			continue
+		}
+		frame := sensor.CameraFrame{
+			ID:              string(model.NewOperationID()),
+			Camera:          "register-camera-" + color,
+			Color:           color,
+			JobGeneration:   current.Generation,
+			PlateGeneration: plateGeneration,
+			WebMeter:        1,
+			Offset:          offset,
+			CapturedAt:      now,
+			ReceivedAt:      now.Add(time.Duration(index+1) * time.Millisecond),
+		}
+		frames[color] = frame
+		runtime.sensors.PutFrame(frame)
+		if err := runtime.registerControl.AcceptFrame(frame, runtime.config.RegisterGap); err != nil {
+			return err
+		}
+		if err := runtime.pressControl.RecordRegister(plateGeneration, color, frame.Offset); err != nil {
+			return err
+		}
 	}
 	receiverState := registerpkg.NewState()
 	if err := receiverState.Start(current.Generation, plateGeneration, 0, now); err != nil {
 		return err
 	}
 	receiver := registerpkg.NewReceiver(receiverState, runtime.config.RegisterGap)
-	if err := receiver.Receive(frame); err != nil {
+	for _, color := range model.ProcessColors() {
+		frame, ok := frames[color]
+		if !ok {
+			continue
+		}
+		if err := receiver.Receive(frame); err != nil {
+			return err
+		}
+	}
+	// A four-color window needs every color; one color with many frames is not
+	// enough to stabilize the set.
+	if !receiver.Stable(1) || !runtime.registerControl.Stable(1) {
+		return fmt.Errorf("register evidence did not stabilize: missing observations for %v", runtime.registerControl.MissingColors())
+	}
+	if !runtime.pressControl.RegisterStable(runtime.config.RegisterTolerance, 1) {
+		return fmt.Errorf("register evidence did not stabilize: out-of-tolerance colors %v", runtime.pressControl.RegisterMissingColors(runtime.config.RegisterTolerance))
+	}
+	// Build the travel-limited joint correction from the actual window. Any
+	// color the window never observed stays on the plan as missing instead of
+	// being assumed zero.
+	plan, err := runtime.registerControl.BeginJointCorrection(plateGeneration, runtime.phase.Maximum())
+	if err != nil {
 		return err
 	}
-	if frame.DeliveryDelay() < 0 || runtime.sensors.FrameCount() == 0 {
-		return fmt.Errorf("register camera diagnostics failed")
+	for _, unit := range plan.Units {
+		if !unit.HasObservation {
+			continue
+		}
+		adjustment, err := press.ApplyRegisterFrame(runtime.phase, unit.Color, frames[unit.Color], current.Generation, plateGeneration)
+		if err != nil {
+			return err
+		}
+		if adjustment.Correction != unit.Applied {
+			return fmt.Errorf("register unit %s correction %v does not match joint plan %v", unit.Color, adjustment.Correction, unit.Applied)
+		}
+		if err := runtime.registerControl.AcknowledgeUnit(plateGeneration, unit.Color, adjustment.Correction); err != nil {
+			return err
+		}
 	}
-	if err := runtime.pressControl.RecordRegister(plateGeneration, frame.Offset); err != nil {
-		return err
-	}
-	if !runtime.pressControl.RegisterStable(0.1, 1) || !runtime.registerControl.Stable(1) {
-		return fmt.Errorf("register evidence did not stabilize")
-	}
-	_, err = press.ApplyRegisterFrame(runtime.phase, "cyan", frame, current.Generation, plateGeneration)
-	return err
+	// Three corrected, acknowledged units must not be reported as a stable
+	// four-color set when the fourth color was never observed.
+	return runtime.registerControl.RequireJointComplete()
 }
 
 func (runtime *Runtime) switchInkOperation(withFault bool) error {

@@ -43,3 +43,10 @@ func (controller *PhaseController) Last(unit string) (float64, bool) {
 	value, ok := controller.commands[unit]
 	return value, ok
 }
+
+// Maximum returns the per-unit phase travel limit the controller clamps to.
+func (controller *PhaseController) Maximum() float64 {
+	controller.mu.RLock()
+	defer controller.mu.RUnlock()
+	return controller.maximum
+}

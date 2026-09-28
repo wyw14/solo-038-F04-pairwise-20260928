@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/wyw14/solo-038/internal/model"
 	"github.com/wyw14/solo-038/internal/sensor"
 )
 
@@ -28,7 +29,13 @@ func (receiver *Receiver) Receive(frame sensor.CameraFrame) error {
 	return receiver.state.Add(frame)
 }
 
+// Stable reports whether every process color has at least minimum frames.
 func (receiver *Receiver) Stable(minimum int) bool {
 	window := receiver.state.Snapshot()
-	return window.Valid && window.Samples >= minimum
+	return window.Stable(model.ProcessColors(), minimum)
+}
+
+// MissingColors returns the process colors without an accepted observation.
+func (receiver *Receiver) MissingColors() []string {
+	return receiver.state.MissingColors()
 }
